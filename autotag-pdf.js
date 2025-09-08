@@ -1,83 +1,144 @@
+const express = require('express');
+const multer = require('multer');
+const cors = require('cors');
+const stream = require('stream');
+const fs = require('fs');
+const path = require('path');
+
 const {
   ServicePrincipalCredentials,
   PDFServices,
   MimeType,
-  AutotagPDFParams,
-  AutotagPDFJob,
-  AutotagPDFResult,
+  PDFAccessibilityCheckerJob,
+  PDFAccessibilityCheckerResult,
 } = require('@adobe/pdfservices-node-sdk');
-const fs = require('fs');
-
 require('dotenv').config();
 
-async function runAnalysis() {
+const app = express();
+
+app.use(
+  cors({
+    origin: 'http://localhost:4200',
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type'],
+  })
+);
+
+const upload = multer({ storage: multer.memoryStorage() });
+
+app.post('/upload-pdf', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).send('No file uploaded');
+
+  console.log('File name:', req.file.originalname);
+  console.log('File size (bytes):', req.file.size);
+  console.log('File mimetype:', req.file.mimetype);
+  console.log('First 100 bytes (hex):', req.file.buffer.slice(0, 100).toString('hex'));
+
+  const bufferStream = new stream.PassThrough();
+  bufferStream.end(req.file.buffer);
+
   let readStream;
+
   try {
-    // Initial setup, create credentials instance
+    // Adobe PDF Services credentials
     const credentials = new ServicePrincipalCredentials({
       clientId: process.env.ADOBE_CLIENT_ID,
       clientSecret: process.env.ADOBE_CLIENT_SECRET,
     });
 
-    // Creates a PDF Services instance
     const pdfServices = new PDFServices({ credentials });
 
-    // Creates an asset(s) from source file(s) and upload
-    readStream = fs.createReadStream('./Adobe_Accessibility_Auto_Tag_API_Sample.pdf');
+    readStream = bufferStream;
     const inputAsset = await pdfServices.upload({
       readStream,
       mimeType: MimeType.PDF,
     });
 
-    // Create parameters for the job
-    const params = new AutotagPDFParams({
-      generateReport: true,
-      shiftHeadings: true,
-    });
+    // Create Accessibility Checker job
+    const job = new PDFAccessibilityCheckerJob({ inputAsset });
 
-    // Creates a new job instance
-    const job = new AutotagPDFJob({ inputAsset, params });
-
-    // Submit the job and get the job result
+    // Submit the job
     const pollingURL = await pdfServices.submit({ job });
+
+    // Get the result
     const pdfServicesResponse = await pdfServices.getJobResult({
       pollingURL,
-      resultType: AutotagPDFResult,
+      resultType: PDFAccessibilityCheckerResult,
     });
 
-    // Get content from the resulting asset(s)
-    const resultAsset = pdfServicesResponse.result.taggedPDF;
+    // The report asset (JSON)
     const resultAssetReport = pdfServicesResponse.result.report;
-    const streamAsset = await pdfServices.getContent({ asset: resultAsset });
     const streamAssetReport = await pdfServices.getContent({ asset: resultAssetReport });
 
-    // Creates output streams and write files
-    const outputFilePath = './autotag-tagged.pdf';
-    const outputFilePathReport = './autotag-report.xlsx';
-    console.log(`Saving asset at ${outputFilePath}`);
-    console.log(`Saving asset at ${outputFilePathReport}`);
+    // --- Save JSON report to server ---
+    const reportsDir = path.join(__dirname, 'reports');
+    if (!fs.existsSync(reportsDir)) fs.mkdirSync(reportsDir);
 
-    // Save tagged PDF
-    await new Promise((resolve, reject) => {
-      const writeStream = fs.createWriteStream(outputFilePath);
-      streamAsset.readStream.pipe(writeStream);
-      writeStream.on('finish', resolve);
-      writeStream.on('error', reject);
-    });
+    const reportFileName = `${Date.now()}-accessibility-report.json`;
+    const reportFilePath = path.join(reportsDir, reportFileName);
 
-    // Save accessibility report
-    await new Promise((resolve, reject) => {
-      const writeStreamReport = fs.createWriteStream(outputFilePathReport);
-      streamAssetReport.readStream.pipe(writeStreamReport);
-      writeStreamReport.on('finish', resolve);
-      writeStreamReport.on('error', reject);
+    const writeStream = fs.createWriteStream(reportFilePath);
+    streamAssetReport.readStream.pipe(writeStream);
+
+    // When finished writing, send the file to the client
+    writeStream.on('finish', () => {
+      res.download(reportFilePath, 'accessibility-report.json', (err) => {
+        if (err) console.error('Error sending file:', err);
+      });
     });
   } catch (err) {
-    console.error('Exception encountered while executing operation:', err);
+    console.error('Error processing PDF:', err);
+    res.status(500).send('Error processing PDF');
   } finally {
     readStream?.destroy();
   }
-}
+});
 
-// Call the async function
-runAnalysis();
+app.listen(3000, () => console.log('Server running on port 3000'));
+
+// const express = require('express');
+// const multer = require('multer');
+// const cors = require('cors');
+
+// const app = express();
+
+// app.use(
+//   cors({
+//     origin: 'http://localhost:4200',
+//     methods: ['GET', 'POST', 'OPTIONS'],
+//     allowedHeaders: ['Content-Type'],
+//   })
+// );
+
+// const upload = multer({ storage: multer.memoryStorage() });
+
+// app.post('/upload-pdf', upload.single('file'), async (req, res) => {
+//   if (!req.file) return res.status(400).send('No file uploaded');
+
+//   console.log('File name:', req.file.originalname);
+//   console.log('File size (bytes):', req.file.size);
+//   console.log('File mimetype:', req.file.mimetype);
+
+//   // --- Dummy JSON for testing ---
+//   const dummyReport = {
+//     fileName: req.file.originalname,
+//     uploadedAt: new Date().toISOString(),
+//     wcagResults: [
+//       { rule: '1.1.1 Non-text Content', status: 'pass' },
+//       { rule: '1.2.1 Audio-only and Video-only (Prerecorded)', status: 'fail' },
+//       { rule: '1.3.1 Info and Relationships', status: 'pass' },
+//     ],
+//     summary: {
+//       totalRules: 3,
+//       passed: 2,
+//       failed: 1,
+//     },
+//   };
+
+//   // Send as JSON file download
+//   res.setHeader('Content-Disposition', 'attachment; filename="accessibility-report.json"');
+//   res.setHeader('Content-Type', 'application/json');
+//   res.send(JSON.stringify(dummyReport, null, 2));
+// });
+
+// app.listen(3000, () => console.log('Server running on port 3000'));
