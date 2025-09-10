@@ -18,3 +18,8 @@ make sure you create a git ignore file (ask chatgpt if you have never done this 
 
 #this runs the program
 node autotag-pdf.js
+
+#creates a branch with your changes
+git push 
+
+#we can review pull requests as a team to identify if things are  good for merge.
