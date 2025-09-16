@@ -5,12 +5,17 @@ const stream = require('stream');
 const fs = require('fs');
 const path = require('path');
 
+const mammoth = require('mammoth');
+const puppeteer = require('puppeteer');
+
 const {
   ServicePrincipalCredentials,
   PDFServices,
   MimeType,
   PDFAccessibilityCheckerJob,
   PDFAccessibilityCheckerResult,
+  CreatePDFJob,
+  FileRef,
 } = require('@adobe/pdfservices-node-sdk');
 require('dotenv').config();
 
@@ -34,10 +39,9 @@ app.post('/upload-pdf', upload.single('file'), async (req, res) => {
   console.log('File mimetype:', req.file.mimetype);
   console.log('First 100 bytes (hex):', req.file.buffer.slice(0, 100).toString('hex'));
 
-  const bufferStream = new stream.PassThrough();
-  bufferStream.end(req.file.buffer);
-
   let readStream;
+  let mimeType = req.file.mimetype;
+  let pdfBuffer;
 
   try {
     // Adobe PDF Services credentials
@@ -48,7 +52,31 @@ app.post('/upload-pdf', upload.single('file'), async (req, res) => {
 
     const pdfServices = new PDFServices({ credentials });
 
-    readStream = bufferStream;
+    // If the file is a .docx, convert it to PDF using mammoth and puppeteer
+    if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || req.file.originalname.endsWith('.docx')) {
+      // Convert DOCX to HTML
+      const mammothResult = await mammoth.convertToHtml({ buffer: req.file.buffer });
+      const html = mammothResult.value;
+
+      // Use puppeteer to render HTML to PDF
+      const browser = await puppeteer.launch();
+      const page = await browser.newPage();
+      await page.setContent(html);
+      pdfBuffer = await page.pdf({ format: 'A4' });
+      await browser.close();
+
+      // Now set up a stream for the PDF
+      readStream = new stream.PassThrough();
+      readStream.end(pdfBuffer);
+      mimeType = MimeType.PDF;
+    } else {
+      // If already PDF, use the uploaded buffer
+      readStream = new stream.PassThrough();
+      readStream.end(req.file.buffer);
+      mimeType = MimeType.PDF;
+    }
+
+    // Upload the PDF (converted or original)
     const inputAsset = await pdfServices.upload({
       readStream,
       mimeType: MimeType.PDF,
