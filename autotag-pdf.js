@@ -29,6 +29,8 @@ app.use(
   })
 );
 
+app.use(express.static(path.join(__dirname, 'public', 'browser')));
+
 app.get('/', (req, res) => res.send('App is running'));
 
 const upload = multer({ storage: multer.memoryStorage() });
