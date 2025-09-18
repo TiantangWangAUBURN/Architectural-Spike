@@ -14,9 +14,35 @@ const {
   MimeType,
   PDFAccessibilityCheckerJob,
   PDFAccessibilityCheckerResult,
-  CreatePDFJob,
-  FileRef,
 } = require('@adobe/pdfservices-node-sdk');
+const ruleDescriptions = {
+  'Tagged PDF':
+    'The document must be properly tagged to support screen readers and assistive technology.',
+  Title: 'The document should have a descriptive title displayed in the title bar.',
+  'Tagged content':
+    'All page content must be tagged so it can be read in the correct order by assistive technologies.',
+  'Figures alternate text': 'All images must include meaningful alternative text descriptions.',
+  'Nested alternate text':
+    'Avoid adding multiple or nested alt texts that will not be read by screen readers.',
+  'Associated with content': 'Alternative text must be tied to the correct content element.',
+  'Hides annotation': 'Alternative text must not hide or obscure annotations in the document.',
+  'Other elements alternate text':
+    'Other elements, such as form fields or artifacts, must also have appropriate alt text when needed.',
+  Rows: 'Every table row (TR) must be inside a valid table structure (Table, THead, TBody, or TFoot).',
+  'TH and TD': 'Table headers (TH) and cells (TD) must always be inside table rows (TR).',
+  Headers: 'Tables should use headers to identify row and column meaning.',
+  Regularity:
+    'All table rows and columns must follow a consistent structure without missing cells.',
+  Summary:
+    'Tables should include a summary to explain their purpose and structure to users with disabilities.',
+  'List items': 'Every list item (LI) must be a child of a list (L).',
+  'Lbl and LBody': 'List labels (Lbl) and list bodies (LBody) must be inside list items (LI).',
+  'Appropriate nesting': 'Lists and other elements must be nested in a logical, accessible order.',
+  'Logical Reading Order':
+    'The content must be structured so that it follows a natural and logical reading sequence.',
+  'Color contrast':
+    'Text and visuals must have sufficient color contrast to be readable by users with visual impairments.',
+};
 require('dotenv').config();
 
 const app = express();
@@ -38,17 +64,11 @@ const upload = multer({ storage: multer.memoryStorage() });
 app.post('/upload-pdf', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded');
 
-  console.log('File name:', req.file.originalname);
-  console.log('File size (bytes):', req.file.size);
-  console.log('File mimetype:', req.file.mimetype);
-  console.log('First 100 bytes (hex):', req.file.buffer.slice(0, 100).toString('hex'));
-
   let readStream;
   let mimeType = req.file.mimetype;
   let pdfBuffer;
 
   try {
-    // Adobe PDF Services credentials
     const credentials = new ServicePrincipalCredentials({
       clientId: process.env.ADOBE_CLIENT_ID,
       clientSecret: process.env.ADOBE_CLIENT_SECRET,
@@ -56,71 +76,83 @@ app.post('/upload-pdf', upload.single('file'), async (req, res) => {
 
     const pdfServices = new PDFServices({ credentials });
 
-    // If the file is a .docx, convert it to PDF using mammoth and puppeteer
-    if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || req.file.originalname.endsWith('.docx')) {
-      // Convert DOCX to HTML
+    if (
+      mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+      req.file.originalname.endsWith('.docx')
+    ) {
       const mammothResult = await mammoth.convertToHtml({ buffer: req.file.buffer });
       const html = mammothResult.value;
 
-      // Use puppeteer to render HTML to PDF
       const browser = await puppeteer.launch();
       const page = await browser.newPage();
       await page.setContent(html);
       pdfBuffer = await page.pdf({ format: 'A4' });
       await browser.close();
 
-      // Now set up a stream for the PDF
       readStream = new stream.PassThrough();
       readStream.end(pdfBuffer);
       mimeType = MimeType.PDF;
     } else {
-      // If already PDF, use the uploaded buffer
       readStream = new stream.PassThrough();
       readStream.end(req.file.buffer);
       mimeType = MimeType.PDF;
     }
 
-    // Upload the PDF (converted or original)
     const inputAsset = await pdfServices.upload({
       readStream,
       mimeType: MimeType.PDF,
     });
 
-    // Create Accessibility Checker job
     const job = new PDFAccessibilityCheckerJob({ inputAsset });
-
-    // Submit the job
     const pollingURL = await pdfServices.submit({ job });
-
-    // Get the result
     const pdfServicesResponse = await pdfServices.getJobResult({
       pollingURL,
       resultType: PDFAccessibilityCheckerResult,
     });
 
-    // The report asset (JSON)
     const resultAssetReport = pdfServicesResponse.result.report;
     const streamAssetReport = await pdfServices.getContent({ asset: resultAssetReport });
 
-    // --- Save JSON report to server ---
-    const reportsDir = path.join(__dirname, 'reports');
-    if (!fs.existsSync(reportsDir)) fs.mkdirSync(reportsDir);
+    // Collect the JSON into memory
+    let data = '';
+    for await (const chunk of streamAssetReport.readStream) {
+      data += chunk.toString();
+    }
 
-    const reportFileName = `${Date.now()}-accessibility-report.json`;
-    const reportFilePath = path.join(reportsDir, reportFileName);
+    // Parse and send JSON response
+    const reportJson = JSON.parse(data);
+    // Helper: flatten all rule arrays
+    const allRules = Object.values(reportJson['Detailed Report'] || {}).flat();
 
-    const writeStream = fs.createWriteStream(reportFilePath);
-    streamAssetReport.readStream.pipe(writeStream);
+    const enhanceRules = (rules) =>
+      rules.map((r) => ({
+        ...r,
+        Description: ruleDescriptions[r.Rule] || r.Description,
+      }));
 
-    // When finished writing, send the file to the client
-    writeStream.on('finish', () => {
-      res.download(reportFilePath, 'accessibility-report.json', (err) => {
-        if (err) console.error('Error sending file:', err);
-      });
-    });
+    const failedRules = enhanceRules(allRules.filter((r) => r.Status === 'Failed'));
+    const manualCheckRules = enhanceRules(
+      allRules.filter((r) => r.Status === 'Needs manual check')
+    );
+
+    const passedCount = allRules.filter((r) => r.Status === 'Passed').length;
+
+    // Build response
+    const filteredResult = {
+      fileName: req.file.originalname,
+      summary: {
+        successCount: passedCount,
+        failedCount: failedRules.length,
+        manualCheckCount: manualCheckRules.length,
+      },
+      failures: failedRules,
+      needsManualCheck: manualCheckRules,
+    };
+
+    res.json(filteredResult);
   } catch (err) {
     console.error('Error processing PDF:', err);
-    res.status(500).send('Error processing PDF');
+    res.status(500).json({ error: 'Error processing PDF' });
   } finally {
     readStream?.destroy();
   }
@@ -168,10 +200,7 @@ app.listen(port, () => console.log(`Server running on port ${port}`));
 //     },
 //   };
 
-//   // Send as JSON file download
-//   res.setHeader('Content-Disposition', 'attachment; filename="accessibility-report.json"');
-//   res.setHeader('Content-Type', 'application/json');
-//   res.send(JSON.stringify(dummyReport, null, 2));
+// ...existing code...
 // });
 
 // app.listen(3000, () => console.log('Server running on port 3000'));
