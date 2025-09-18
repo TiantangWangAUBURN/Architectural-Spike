@@ -15,6 +15,7 @@ const {
   PDFAccessibilityCheckerJob,
   PDFAccessibilityCheckerResult,
 } = require('@adobe/pdfservices-node-sdk');
+
 const ruleDescriptions = {
   'Tagged PDF':
     'The document must be properly tagged to support screen readers and assistive technology.',
@@ -43,7 +44,6 @@ const ruleDescriptions = {
   'Color contrast':
     'Text and visuals must have sufficient color contrast to be readable by users with visual impairments.',
 };
-require('dotenv').config();
 
 const app = express();
 
@@ -54,8 +54,6 @@ app.use(
     allowedHeaders: ['Content-Type'],
   })
 );
-
-app.use(express.static(path.join(__dirname, 'public', 'browser')));
 
 app.get('/', (req, res) => res.send('App is running'));
 
@@ -69,57 +67,68 @@ app.post('/upload-pdf', upload.single('file'), async (req, res) => {
   let pdfBuffer;
 
   try {
+    // Adobe PDF Services credentials
     const credentials = new ServicePrincipalCredentials({
       clientId: process.env.ADOBE_CLIENT_ID,
       clientSecret: process.env.ADOBE_CLIENT_SECRET,
     });
 
     const pdfServices = new PDFServices({ credentials });
-
-    if (
+        if (
       mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
       req.file.originalname.endsWith('.docx')
     ) {
+  
       const mammothResult = await mammoth.convertToHtml({ buffer: req.file.buffer });
       const html = mammothResult.value;
 
+      // Use puppeteer to render HTML to PDF
       const browser = await puppeteer.launch();
       const page = await browser.newPage();
       await page.setContent(html);
       pdfBuffer = await page.pdf({ format: 'A4' });
       await browser.close();
 
+      // Now set up a stream for the PDF
       readStream = new stream.PassThrough();
       readStream.end(pdfBuffer);
       mimeType = MimeType.PDF;
     } else {
+      // If already PDF, use the uploaded buffer
       readStream = new stream.PassThrough();
       readStream.end(req.file.buffer);
       mimeType = MimeType.PDF;
     }
 
+    // Upload the PDF (converted or original)
     const inputAsset = await pdfServices.upload({
       readStream,
       mimeType: MimeType.PDF,
     });
 
+    // Create Accessibility Checker job
     const job = new PDFAccessibilityCheckerJob({ inputAsset });
+
+    // Submit the job
     const pollingURL = await pdfServices.submit({ job });
+
+    // Get the result
     const pdfServicesResponse = await pdfServices.getJobResult({
       pollingURL,
       resultType: PDFAccessibilityCheckerResult,
     });
 
+    // The report asset (JSON)
     const resultAssetReport = pdfServicesResponse.result.report;
     const streamAssetReport = await pdfServices.getContent({ asset: resultAssetReport });
 
-    // Collect the JSON into memory
+        // Collect the JSON into memory
     let data = '';
     for await (const chunk of streamAssetReport.readStream) {
       data += chunk.toString();
     }
 
-    // Parse and send JSON response
+     // Parse and send JSON response
     const reportJson = JSON.parse(data);
     // Helper: flatten all rule arrays
     const allRules = Object.values(reportJson['Detailed Report'] || {}).flat();
@@ -151,13 +160,12 @@ app.post('/upload-pdf', upload.single('file'), async (req, res) => {
 
     res.json(filteredResult);
   } catch (err) {
-    console.error('Error processing PDF:', err);
+    console.error.json('Error processing PDF:', err);
     res.status(500).json({ error: 'Error processing PDF' });
   } finally {
     readStream?.destroy();
   }
 });
-
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Server running on port ${port}`));
 
@@ -200,7 +208,10 @@ app.listen(port, () => console.log(`Server running on port ${port}`));
 //     },
 //   };
 
-// ...existing code...
+//   // Send as JSON file download
+//   res.setHeader('Content-Disposition', 'attachment; filename="accessibility-report.json"');
+//   res.setHeader('Content-Type', 'application/json');
+//   res.send(JSON.stringify(dummyReport, null, 2));
 // });
 
 // app.listen(3000, () => console.log('Server running on port 3000'));
