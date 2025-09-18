@@ -23,11 +23,13 @@ const app = express();
 
 app.use(
   cors({
-    origin: 'http://localhost:4200',
+    origin: '*',
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type'],
   })
 );
+
+app.get('/', (req, res) => res.send('App is running'));
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -122,7 +124,8 @@ app.post('/upload-pdf', upload.single('file'), async (req, res) => {
   }
 });
 
-app.listen(3000, () => console.log('Server running on port 3000'));
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Server running on port ${port}`));
 
 // const express = require('express');
 // const multer = require('multer');
