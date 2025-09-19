@@ -49,7 +49,7 @@ const app = express();
 
 app.use(
   cors({
-    origin: '*',
+    origin: ['https://kmoreland126.github.io', '*'],
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type'],
   })
