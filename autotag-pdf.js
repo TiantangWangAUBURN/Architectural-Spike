@@ -177,8 +177,8 @@ app.listen(port, () => console.log(`Server running on port ${port}`));
     app.use(
       cors({
         origin: [
-          'https://kmoreland126.github.io',
-          'https://kmoreland126.github.io/dashboard'
+          'https://kmoreland126.github.io/Accessibility-Checker/',
+          'https://kmoreland126.github.io/Accessibility-Checker/dashboard'
         ],
         methods: ['GET', 'POST', 'OPTIONS'],
         allowedHeaders: ['Content-Type'],
