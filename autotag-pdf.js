@@ -49,7 +49,7 @@ const app = express();
 
 app.use(
   cors({
-    origin: ['https://kmoreland126.github.io', '*'],
+    origin: ['https://kmoreland126.github.io'],
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type'],
   })
@@ -174,13 +174,16 @@ app.listen(port, () => console.log(`Server running on port ${port}`));
 // const cors = require('cors');
 
 // const app = express();
-
-// app.use(
-//   cors({
-//     origin: 'http://localhost:4200',
-//     methods: ['GET', 'POST', 'OPTIONS'],
-//     allowedHeaders: ['Content-Type'],
-//   })
+    app.use(
+      cors({
+        origin: [
+          'https://kmoreland126.github.io',
+          'https://kmoreland126.github.io/dashboard'
+        ],
+        methods: ['GET', 'POST', 'OPTIONS'],
+        allowedHeaders: ['Content-Type'],
+      })
+    );
 // );
 
 // const upload = multer({ storage: multer.memoryStorage() });
