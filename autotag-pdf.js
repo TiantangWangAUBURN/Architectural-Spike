@@ -176,10 +176,7 @@ app.listen(port, () => console.log(`Server running on port ${port}`));
 // const app = express();
     app.use(
       cors({
-        origin: [
-          'https://kmoreland126.github.io/Accessibility-Checker/',
-          'https://kmoreland126.github.io/Accessibility-Checker/dashboard'
-        ],
+        origin: '*',
         methods: ['GET', 'POST', 'OPTIONS'],
         allowedHeaders: ['Content-Type'],
       })
