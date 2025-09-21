@@ -49,7 +49,12 @@ const app = express();
 
 app.use(
   cors({
-    origin: ['https://kmoreland126.github.io'],
+    origin: [
+      'https://kmoreland126.github.io',
+      'https://kmoreland126.github.io/Accessibility-Checker',
+      'https://www.accessibilitychecker.app',
+      'https://accessibilitychecker.app'
+    ],
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type'],
   })
