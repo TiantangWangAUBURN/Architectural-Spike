@@ -8,6 +8,9 @@ const path = require('path');
 const mammoth = require('mammoth');
 const puppeteer = require('puppeteer');
 
+// Microsoft Graph Service
+const MicrosoftGraphService = require('./services/microsoftGraphService');
+
 const {
   ServicePrincipalCredentials,
   PDFServices,
@@ -52,8 +55,8 @@ app.use(
     origin: [
       'https://kmoreland126.github.io',
       'https://kmoreland126.github.io/Accessibility-Checker',
-      'https://www.accessibilitychecker.app',
-      'https://accessibilitychecker.app'
+      'http://localhost:4200',
+      'https://localhost:4200'
     ],
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type'],
@@ -165,12 +168,129 @@ app.post('/upload-pdf', upload.single('file'), async (req, res) => {
 
     res.json(filteredResult);
   } catch (err) {
-    console.error.json('Error processing PDF:', err);
+    console.error('Error processing PDF:', err);
     res.status(500).json({ error: 'Error processing PDF' });
   } finally {
     readStream?.destroy();
   }
 });
+
+// New route for processing Microsoft Graph files
+app.post('/process-office-file', async (req, res) => {
+  try {
+    const { fileId, fileName } = req.body;
+    
+    if (!fileId) {
+      return res.status(400).json({ error: 'File ID is required' });
+    }
+
+    const graphService = new MicrosoftGraphService();
+    
+    // Initialize the Graph client
+    const initialized = await graphService.initializeGraphClient();
+    if (!initialized) {
+      return res.status(500).json({ error: 'Failed to initialize Microsoft Graph client' });
+    }
+
+    // Get file content from Microsoft Graph
+    const fileData = await graphService.getFileContent(fileId);
+    
+    // Convert to PDF if it's an Office document
+    let pdfBuffer;
+    let mimeType = fileData.mimeType;
+
+    if (mimeType?.includes('officedocument') || mimeType?.includes('ms-')) {
+      // Try to convert using Graph API first
+      try {
+        const pdfData = await graphService.convertToPdf(fileId, fileData.name);
+        pdfBuffer = pdfData.content;
+        mimeType = 'application/pdf';
+      } catch (conversionError) {
+        // Fallback to mammoth + puppeteer for Word documents
+        if (mimeType?.includes('wordprocessingml')) {
+          const mammothResult = await mammoth.convertToHtml({ buffer: fileData.content });
+          const html = mammothResult.value;
+
+          const browser = await puppeteer.launch();
+          const page = await browser.newPage();
+          await page.setContent(html);
+          pdfBuffer = await page.pdf({ format: 'A4' });
+          await browser.close();
+          mimeType = 'application/pdf';
+        } else {
+          throw new Error('Cannot convert this file type to PDF');
+        }
+      }
+    } else if (mimeType === 'application/pdf') {
+      pdfBuffer = fileData.content;
+    } else {
+      return res.status(400).json({ error: 'Unsupported file type' });
+    }
+
+    // Process with Adobe PDF Services
+    const credentials = new ServicePrincipalCredentials({
+      clientId: process.env.ADOBE_CLIENT_ID,
+      clientSecret: process.env.ADOBE_CLIENT_SECRET,
+    });
+
+    const pdfServices = new PDFServices({ credentials });
+
+    const readStream = new stream.PassThrough();
+    readStream.end(pdfBuffer);
+
+    const inputAsset = await pdfServices.upload({
+      readStream,
+      mimeType: MimeType.PDF,
+    });
+
+    const job = new PDFAccessibilityCheckerJob({ inputAsset });
+    const pollingURL = await pdfServices.submit({ job });
+    const pdfServicesResponse = await pdfServices.getJobResult({
+      pollingURL,
+      resultType: PDFAccessibilityCheckerResult,
+    });
+
+    const resultAssetReport = pdfServicesResponse.result.report;
+    const streamAssetReport = await pdfServices.getContent({ asset: resultAssetReport });
+
+    let data = '';
+    for await (const chunk of streamAssetReport.readStream) {
+      data += chunk.toString();
+    }
+
+    const reportJson = JSON.parse(data);
+    const allRules = Object.values(reportJson['Detailed Report'] || {}).flat();
+
+    const enhanceRules = (rules) =>
+      rules.map((r) => ({
+        ...r,
+        Description: ruleDescriptions[r.Rule] || r.Description,
+      }));
+
+    const failedRules = enhanceRules(allRules.filter((r) => r.Status === 'Failed'));
+    const manualCheckRules = enhanceRules(
+      allRules.filter((r) => r.Status === 'Needs manual check')
+    );
+    const passedCount = allRules.filter((r) => r.Status === 'Passed').length;
+
+    const filteredResult = {
+      fileName: fileName || fileData.name,
+      summary: {
+        successCount: passedCount,
+        failedCount: failedRules.length,
+        manualCheckCount: manualCheckRules.length,
+      },
+      failures: failedRules,
+      needsManualCheck: manualCheckRules,
+    };
+
+    res.json(filteredResult);
+  } catch (err) {
+    console.error('Error processing Office file:', err);
+    res.status(500).json({ error: 'Error processing Office file: ' + err.message });
+  }
+});
+
 const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`Server running on port ${port}`));
 
