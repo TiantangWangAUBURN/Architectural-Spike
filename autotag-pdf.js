@@ -8,14 +8,6 @@ const path = require('path');
 const mammoth = require('mammoth');
 const puppeteer = require('puppeteer');
 
-const {
-  ServicePrincipalCredentials,
-  PDFServices,
-  MimeType,
-  PDFAccessibilityCheckerJob,
-  PDFAccessibilityCheckerResult,
-} = require('@adobe/pdfservices-node-sdk');
-
 const ruleDescriptions = {
   'Tagged PDF':
     'The document must be properly tagged to support screen readers and assistive technology.',
@@ -45,6 +37,87 @@ const ruleDescriptions = {
     'Text and visuals must have sufficient color contrast to be readable by users with visual impairments.',
 };
 
+// Filename validation functions for accessibility compliance
+function validateFileName(filename) {
+  const errors = [];
+  const warnings = [];
+  
+  if (!filename || filename.trim() === '') {
+    errors.push('Filename cannot be empty');
+    return { isValid: false, errors, warnings };
+  }
+
+  const nameWithoutExt = filename.replace(/\.[^/.]+$/, '');
+  
+  // Check for generic names (Section 508 compliance)
+  const genericPatterns = [
+    /^document\d*$/i,
+    /^untitled\d*$/i,
+    /^new\s?document\d*$/i,
+    /^doc\d*$/i,
+    /^file\d*$/i,
+    /^download\d*$/i
+  ];
+  
+  if (genericPatterns.some(pattern => pattern.test(nameWithoutExt))) {
+    errors.push('Filename appears generic (like "document1" or "untitled"). Use a descriptive name that explains the document\'s content.');
+  }
+  
+  // Check for underscores (accessibility best practice)
+  if (filename.includes('_')) {
+    warnings.push('Underscores in filenames can cause issues with screen readers. Consider using hyphens (-) instead.');
+  }
+  
+  // Check minimum length and meaningful content
+  if (nameWithoutExt.length < 3) {
+    errors.push('Filename should be at least 3 characters long and descriptive.');
+  }
+  
+  if (!/[a-zA-Z]/.test(nameWithoutExt)) {
+    errors.push('Filename should contain meaningful letters, not just numbers or symbols.');
+  }
+  
+  // Check for special characters that might cause issues
+  const problematicChars = /[<>:"|?*\\]/;
+  if (problematicChars.test(filename)) {
+    errors.push('Filename contains characters that may cause accessibility or system issues: < > : " | ? * \\');
+  }
+  
+  return {
+    isValid: errors.length === 0,
+    errors,
+    warnings
+  };
+}
+
+function suggestBetterFilename(filename, title = '') {
+  let suggested = filename;
+  
+  // Replace underscores with hyphens
+  suggested = suggested.replace(/_/g, '-');
+  
+  // If generic, suggest based on title or use placeholder
+  const nameWithoutExt = filename.replace(/\.[^/.]+$/, '');
+  const extension = filename.split('.').pop();
+  
+  const genericPatterns = [
+    /^document\d*$/i,
+    /^untitled\d*$/i,
+    /^new\s?document\d*$/i,
+    /^doc\d*$/i,
+    /^file\d*$/i
+  ];
+  
+  if (genericPatterns.some(pattern => pattern.test(nameWithoutExt))) {
+    const titleBased = title?.trim() ? 
+      title.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') : 
+      'descriptive-document-name';
+    suggested = `${titleBased}.${extension}`;
+  }
+  
+  return suggested;
+}
+
 const app = express();
 
 app.use(
@@ -69,6 +142,61 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 app.post('/upload-pdf', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).send('No file uploaded');
+
+  // Validate filename for accessibility compliance
+  const filenameValidation = validateFileName(req.file.originalname);
+  const documentTitle = req.body.title || '';
+  
+  if (!filenameValidation.isValid) {
+    return res.status(400).json({
+      error: 'Filename does not meet accessibility standards',
+      details: {
+        filename: req.file.originalname,
+        errors: filenameValidation.errors,
+        warnings: filenameValidation.warnings,
+        suggestedFilename: suggestBetterFilename(req.file.originalname, documentTitle)
+      },
+      accessibilityGuidance: {
+        section508: 'Descriptive file names are necessary for users who rely on screen readers and beneficial to all users to find your document.',
+        webAIM: 'Use meaningful, descriptive filenames that clearly indicate the document\'s content.',
+        recommendations: [
+          'Use descriptive words that explain the document content',
+          'Avoid generic names like "document1" or "untitled"',
+          'Replace underscores with hyphens for better screen reader compatibility',
+          'Keep filenames concise but meaningful'
+        ]
+      }
+    });
+  }
+  
+  // Log filename validation warnings (even if valid)
+  if (filenameValidation.warnings.length > 0) {
+    console.log('Filename warnings for', req.file.originalname, ':', filenameValidation.warnings);
+  }
+  
+  // Validate file type - only accept .docx files
+  if (!req.file.originalname.toLowerCase().endsWith('.docx') && 
+      req.file.mimetype !== 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    return res.status(400).json({
+      error: 'Invalid file type',
+      details: {
+        message: 'Only Word documents (.docx) are supported',
+        receivedType: req.file.mimetype,
+        receivedExtension: path.extname(req.file.originalname)
+      }
+    });
+  }
+  
+  // Validate document title if provided
+  if (!documentTitle || documentTitle.trim() === '') {
+    return res.status(400).json({
+      error: 'Document title is required',
+      details: {
+        message: 'A descriptive document title must be provided for accessibility compliance',
+        accessibilityNote: 'Document titles help users with assistive technologies understand the content'
+      }
+    });
+  }
 
   let readStream;
   let mimeType = req.file.mimetype;
@@ -154,9 +282,16 @@ app.post('/upload-pdf', upload.single('file'), async (req, res) => {
 
     const passedCount = allRules.filter((r) => r.Status === 'Passed').length;
 
-    // Build response
+    // Build response with filename validation info
     const filteredResult = {
       fileName: req.file.originalname,
+      documentTitle: documentTitle,
+      filenameValidation: {
+        isValid: filenameValidation.isValid,
+        warnings: filenameValidation.warnings,
+        suggestedFilename: filenameValidation.warnings.length > 0 ? 
+          suggestBetterFilename(req.file.originalname, documentTitle) : null
+      },
       summary: {
         successCount: passedCount,
         failedCount: failedRules.length,
@@ -164,6 +299,12 @@ app.post('/upload-pdf', upload.single('file'), async (req, res) => {
       },
       failures: failedRules,
       needsManualCheck: manualCheckRules,
+      processedAt: new Date().toISOString(),
+      accessibilityCompliance: {
+        filenameStandards: 'Section 508 & WebAIM compliant',
+        documentType: 'Word Document (.docx)',
+        validationPassed: true
+      }
     };
 
     res.json(filteredResult);

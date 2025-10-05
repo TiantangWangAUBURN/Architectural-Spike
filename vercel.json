@@ -2,14 +2,14 @@
   "version": 2,
   "builds": [
     {
-      "src": "autotag-pdf.js",
+      "src": "docx-converter.js",
       "use": "@vercel/node"
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "/autotag-pdf.js"
+      "dest": "/docx-converter.js"
     }
   ]
 }
