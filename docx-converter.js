@@ -2,7 +2,6 @@ const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
 const mammoth = require('mammoth');
-const puppeteer = require('puppeteer');
 
 const app = express();
 
@@ -23,7 +22,7 @@ app.use(
 // JSON body parsing middleware
 app.use(express.json());
 
-app.get('/', (req, res) => res.send('DOCX to PDF Converter - App is running'));
+app.get('/', (req, res) => res.send('DOCX Analyzer - App is running'));
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -49,7 +48,7 @@ app.post('/upload-docx', upload.single('file'), async (req, res) => {
 
     console.log(`Processing .docx file: ${originalname} (${buffer.length} bytes)`);
 
-    // Convert DOCX to HTML using mammoth
+    // Convert DOCX to HTML using mammoth for analysis (keep the original .docx intact)
     const mammothResult = await mammoth.convertToHtml({ buffer });
     const html = mammothResult.value;
 
@@ -57,34 +56,13 @@ app.post('/upload-docx', upload.single('file'), async (req, res) => {
     const textContent = mammothResult.value.replace(/<[^>]*>/g, '').trim();
     const wordCount = textContent.split(/\s+/).filter(word => word.length > 0).length;
 
-    // Convert HTML to PDF using puppeteer
-    const browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
-    
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'domcontentloaded' });
-    
-    const pdfBuffer = await page.pdf({ 
-      format: 'A4',
-      margin: {
-        top: '1in',
-        right: '1in',
-        bottom: '1in',
-        left: '1in'
-      }
-    });
-    
-    await browser.close();
-
-    // Generate basic document analysis
+    // Generate basic document analysis (no PDF conversion)
     const analysis = {
       fileName: originalname,
       originalSize: buffer.length,
-      pdfSize: pdfBuffer.length,
+      docxSize: buffer.length,
       wordCount: wordCount,
-      conversionTime: new Date().toISOString(),
+      analysisTime: new Date().toISOString(),
       hasImages: html.includes('<img'),
       hasLinks: html.includes('<a'),
       hasTables: html.includes('<table'),
@@ -105,15 +83,15 @@ app.post('/upload-docx', upload.single('file'), async (req, res) => {
       analysis.warnings.push('Document appears to have very little text content');
     }
 
-    // Return PDF as base64 with analysis
+    // Return original DOCX as base64 with analysis
     const response = {
       success: true,
-      message: 'DOCX successfully converted to PDF',
+      message: 'DOCX uploaded and analyzed',
       analysis: analysis,
-      pdf: {
-        data: pdfBuffer.toString('base64'),
-        mimeType: 'application/pdf',
-        filename: originalname.replace('.docx', '.pdf')
+      docx: {
+        data: buffer.toString('base64'),
+        mimeType: mimetype,
+        filename: originalname
       }
     };
 
@@ -131,14 +109,20 @@ app.post('/upload-docx', upload.single('file'), async (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
-    service: 'docx-to-pdf-converter',
+    service: 'docx-analyzer',
     timestamp: new Date().toISOString() 
   });
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`DOCX to PDF Converter running on port ${port}`);
-  console.log('Supported: .docx files only');
-  console.log('Features: DOCX to PDF conversion with basic accessibility analysis');
-});
+// Export app for Vercel serverless
+module.exports = app;
+
+// Only start server when run directly (not on Vercel)
+if (require.main === module) {
+  const port = process.env.PORT || 3000;
+  app.listen(port, () => {
+    console.log(`DOCX Analyzer running on port ${port}`);
+    console.log('Supported: .docx files only');
+    console.log('Features: DOCX analysis (no PDF conversion) with basic accessibility checks');
+  });
+}
