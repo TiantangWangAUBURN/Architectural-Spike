@@ -62,19 +62,33 @@ def is_docx(filename: str, mime: Optional[str]) -> bool:
         mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
 
-def looks_undescriptive(name: str) -> bool:
+def file_name_has_problems(name: str) -> bool:
+    """
+    This function checks if a filename is undescriptive, based on certain patterns.
+    It checks for filenames that are like 'document#', 'untitled#', or similar.
+    """
     base = re.sub(r"\.docx$", "", name, flags=re.I)
+    print(f"Checking if file is undescriptive: {base}")  # Debug line
+
     return (
         re.fullmatch(r"document\d*", base, flags=re.I) is not None
-        or re.fullmatch(r"untitled", base, flags=re.I) is not None
-        or re.fullmatch(r"\d+", base) is not None
-        or len(base) < 4
+        or re.fullmatch(r"untitled\d*", base, flags=re.I) is not None
+        or len(base) < 4  # If the base filename is too short (e.g., "1234.docx")
+        or "_" in base  # Check if the filename contains underscores
     )
 
 def slugify(s: str) -> str:
+    """
+    This function transforms a string into a slug by:
+    - Removing unwanted characters
+    - Replacing underscores with hyphens
+    - Keeping hyphens intact
+    """
+    print(f"Original filename for slugify: {s}")  # Debug line
     s = re.sub(r"[^\w\s-]", "", s).strip().lower()
-    s = re.sub(r"[\s_]+", "-", s)
-    s = re.sub(r"-{2,}", "-", s)
+    s = re.sub(r"[\s_]+", "-", s)  # Replace spaces and underscores with hyphens
+    s = re.sub(r"-{2,}", "-", s)  # Replace multiple hyphens with a single one
+    print(f"Slugified filename: {s}")  # Debug line
     return s or "document"
 
 def hex_to_srgb(h: str):
@@ -133,6 +147,7 @@ def read_xml_part(data: bytes, name: str) -> Optional[bytes]:
 
 # ---------- LOW-RISK REMEDIATIONS ----------
 def remove_protection_bytes(orig_xml: bytes) -> Optional[bytes]:
+    print(orig_xml)
     root = etree.fromstring(orig_xml)
     ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
     prot = root.find("w:documentProtection", ns)
@@ -175,20 +190,29 @@ def first_heading_text(doc: Document) -> str:
             if t:
                 return t
     return ""
-
-def ensure_title_bytes(core_xml: bytes, new_title: str) -> Optional[bytes]:
+def ensure_title_bytes(core_xml: bytes) -> Optional[bytes]:
+    # Proceed with existing logic
     root = etree.fromstring(core_xml)
     ns = {
         "cp": "http://schemas.openxmlformats.org/package/2006/metadata/core-properties",
         "dc": "http://purl.org/dc/elements/1.1/",
     }
+    
+    # Find the <dc:title> element
     title_el = root.find("dc:title", ns)
     cur = (title_el.text or "").strip() if title_el is not None else ""
-    if cur and not re.match(r"(document\d*|untitled)$", cur, flags=re.I):
+
+    # If the current title is undescriptive or needs to be changed, set it to "Needs Title"
+    if not cur or re.match(r"(document\d*|untitled|needs title)$", cur, flags=re.I):
+        # If the title is already "Needs Title", do nothing
+        if title_el is None:
+            title_el = etree.SubElement(root, "{%s}title" % ns["dc"])
+        title_el.text = "Needs Title"  # Set it to "Needs Title"
+    else:
+        # If the title is already descriptive, don't change it
         return None
-    if title_el is None:
-        title_el = etree.SubElement(root, "{%s}title" % ns["dc"])
-    title_el.text = new_title or "Needs Title"
+
+    # Return the modified XML
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone="yes")
 
 def set_table_header_repeat(doc: Document, report: Dict[str, Any]):
@@ -347,9 +371,46 @@ def detect_contrast(doc: Document, report: Dict[str, Any]):
     report["details"]["colorContrastIssues"] = issues
     report["summary"]["flagged"] += len(issues)
 
+def file_name_has_underscores(name: str) -> bool:
+    """
+    This function checks if a filename contains underscores.
+    """
+    return "_" in name
+
+def file_name_is_untitled_or_document_followed_by_number(name: str) -> bool:
+    """
+    This function checks if a filename matches the pattern of 'untitled' or 'document',
+    optionally followed by a number.
+    """
+    base = re.sub(r"\.docx$", "", name, flags=re.I)  # Remove .docx extension
+    
+    # Match 'untitled' or 'document' optionally followed by digits
+    return bool(re.match(r"^(untitled|document)(\d*)$", base, flags=re.I))
+
+
+def process_file_name(file, report):
+    # **Filename suggestion and renaming logic**
+    if file_name_has_problems(file.filename):  # If the filename is undescriptive (document#, untitled#)
+        if file_name_has_underscores(file.filename):  # If the filename has underscores
+            base = re.sub(r"\.docx$", "", file.filename, flags=re.I)
+            base = base.replace("_", "-")  # Replace underscores with hyphens
+            # Use the slugify function to format the base filename
+            report["suggestedFileName"] = f"{slugify(base)}.docx"
+            report["details"]["fileNameFixed"] = True
+            report["summary"]["fixed"] += 1
+        elif file_name_is_untitled_or_document_followed_by_number(file.filename):
+            # If the filename is something like "untitled123" or "document123"
+            report["details"]["fileNameNeedsFixing"] = True
+            report["summary"]["flagged"] += 1
+    else:
+        # If the file name is already fine, retain it
+        report["suggestedFileName"] = file.filename
+
+
 # ---------- MAIN ROUTES ----------
 @app.post("/upload-document")
 async def upload_document(file: UploadFile = File(...), title: str = Form(default="")):
+
     if not file:
         raise HTTPException(400, "No file uploaded")
     if not is_docx(file.filename, file.content_type):
@@ -360,13 +421,14 @@ async def upload_document(file: UploadFile = File(...), title: str = Form(defaul
 
     report = {
         "fileName": file.filename,
-        "suggestedFileName": None,
+        "suggestedFileName": None,  # Initialize the suggestedFileName
         "summary": {"fixed": 0, "flagged": 0},
         "details": {
             "removedProtection": False,
-            "titleFixed": False,
+            "fileNameFixed": False,
+            "fileNameNeedsFixing": False,
+            "titleNeedsFixing": False,
             "tablesHeaderRowSet": [],
-            # detect-only
             "emptyHeadings": [],
             "headingOrderIssues": [],
             "mergedSplitEmptyCells": [],
@@ -378,7 +440,6 @@ async def upload_document(file: UploadFile = File(...), title: str = Form(defaul
             "gifsDetected": [],
             "colorContrastIssues": [],
             "languageDefaultFixed": None,
-            "filenameFlag": None,
         },
     }
 
@@ -413,11 +474,11 @@ async def upload_document(file: UploadFile = File(...), title: str = Form(defaul
 
     core_xml = read_xml_part(phase_a_bytes, "docProps/core.xml")
     if core_xml:
-        new_core = ensure_title_bytes(core_xml, first_heading_text(Document(str(tmp_path))))
+        new_core = ensure_title_bytes(core_xml)
         if new_core is not None:
             replacements["docProps/core.xml"] = new_core
-            report["details"]["titleFixed"] = True
-            report["summary"]["fixed"] += 1
+            report["details"]["titleNeedsFixing"] = True
+            report["summary"]["flagged"] += 1
 
     final_bytes = write_pkg_xml(phase_a_bytes, replacements)
     tmp_path.unlink(missing_ok=True)
@@ -451,22 +512,18 @@ async def upload_document(file: UploadFile = File(...), title: str = Form(defaul
     finally:
         detect_tmp.unlink(missing_ok=True)
 
-    # Filename suggestion
-    if looks_undescriptive(file.filename):
-        base = "needs-title" if report["details"]["titleFixed"] else re.sub(r"\.docx$", "", file.filename, flags=re.I)
-        report["suggestedFileName"] = f"{slugify(base)}.docx"
-        report["details"]["filenameFlag"] = "File name looks undescriptive; consider renaming."
-        report["summary"]["flagged"] += 1
+    # **Filename suggestion and renaming logic**
+    process_file_name(file, report)
 
     # -------- Register downloadable file (no base64) --------
     download_id = uuid.uuid4().hex
-    suggested = report["suggestedFileName"] or (re.sub(r"\.docx$", "", file.filename, flags=re.I) + "-remediated.docx")
+    suggested_file_name = report["suggestedFileName"] or f"{re.sub(r'\.docx$', '', file.filename)}-remediated.docx"
     out_path = DOWNLOAD_DIR / f"{download_id}.docx"
     out_path.write_bytes(final_bytes)
 
     pending[download_id] = {
         "path": str(out_path),
-        "name": suggested,
+        "name": suggested_file_name,  # Use the suggested file name here
         "expires_at": now_ts() + DOWNLOAD_TTL_SEC,
     }
     schedule_cleanup()
@@ -478,6 +535,7 @@ async def upload_document(file: UploadFile = File(...), title: str = Form(defaul
         "downloadId": download_id,
         "downloadUrl": f"{PUBLIC_BASE_URL}/download/{download_id}",
     })
+
 
 @app.get("/download/{download_id}")
 def download(download_id: str):
