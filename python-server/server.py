@@ -39,7 +39,7 @@ pending: Dict[str, Dict[str, Any]] = {}
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4200"],
+    allow_origins=["http://localhost:4200, "],
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -569,3 +569,13 @@ def download(download_id: str):
         headers={"Content-Disposition": f'attachment; filename="{Path(name).name}"'},
         background=BackgroundTask(_cleanup),  # <-- runs after response is sent
 )
+
+def handler(request):
+    """
+    The handler function which Vercel will call.
+    """
+    from fastapi import Request, Response
+    from fastapi.responses import JSONResponse
+
+    # Make sure to create FastAPI app as a callable.
+    return app(request)
