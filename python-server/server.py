@@ -528,13 +528,13 @@ async def download_document(file: UploadFile = File(...)):
     tmp_path.write_bytes(original_bytes)
     doc = Document(str(tmp_path))
     
-    # Apply specific fixes (table headers, etc.)
-    set_table_header_repeat(doc, report={})  # Report not needed, just apply fix
+    # Apply the header repeat fix (table headers, etc.)
+    set_table_header_repeat(doc, report={})  # No report needed here
     doc.save(str(tmp_path))
     phase_a_bytes = tmp_path.read_bytes()
     tmp_path.unlink(missing_ok=True)  # Clean up the temp file
 
-    # Phase B: Apply XML replacements
+    # Phase B: Apply XML replacements (same as upload-document)
     replacements: Dict[str, bytes] = {}
 
     settings_xml = read_xml_part(phase_a_bytes, "word/settings.xml")
@@ -555,17 +555,16 @@ async def download_document(file: UploadFile = File(...)):
         if new_core:
             replacements["docProps/core.xml"] = new_core
 
-    # Rebuild the file with all fixes
+    # Rebuild the file with all fixes (same logic as upload)
     final_bytes = write_pkg_xml(phase_a_bytes, replacements)
 
+    # **Apply file naming convention** (same as upload-document)
+    base_filename = re.sub(r"\.docx$", "", file.filename, flags=re.I)  # Remove the .docx extension
+    base_filename = base_filename.replace("_", "-")  # Replace underscores with hyphens
+    slugified_filename = slugify(base_filename)  # Apply the slugify function
+    suggested_file_name = f"{slugified_filename}.docx"  # Add "-remediated" suffix
+
     # Now, prepare the remediated file for streaming back to the user
-    download_id = uuid.uuid4().hex
-    suggested_file_name = f"{file.filename.rsplit('.', 1)[0]}-remediated.docx"
-    out_path = DOWNLOAD_DIR / f"{download_id}.docx"
-    out_path.write_bytes(final_bytes)
-
-
-    # Return the file as a download
     def iterfile():
         yield final_bytes  # Stream the remediated file directly
 
