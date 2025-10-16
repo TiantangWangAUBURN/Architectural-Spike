@@ -8,8 +8,12 @@
   ],
   "routes": [
     {
-      "src": "/(.*)",
-      "dest": "server.py"
+      "src": "/download-document",
+      "dest": "/server.py"
+    },
+    {
+      "src": "/upload-document",
+      "dest": "/server.py"
     }
   ]
 }

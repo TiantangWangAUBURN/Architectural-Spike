@@ -32,9 +32,6 @@ DOWNLOAD_TTL_SEC = 15 * 60
 DOWNLOAD_DIR = Path(tempfile.gettempdir()) / "docx-remediations"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# in-memory registry: id -> { path, expires_at, name }
-pending: Dict[str, Dict[str, Any]] = {}
-
 # ---------- APP ----------
 app = FastAPI()
 app.add_middleware(
@@ -109,15 +106,6 @@ def contrast_ratio(fg_hex: str, bg_hex: str = "FFFFFF") -> float:
 
 def now_ts():
     return int(time.time())
-
-def schedule_cleanup():
-    to_delete = [k for k, v in pending.items() if v["expires_at"] <= now_ts()]
-    for k in to_delete:
-        try:
-            Path(pending[k]["path"]).unlink(missing_ok=True)
-        except Exception:
-            pass
-        pending.pop(k, None)
 
 def write_pkg_xml(original_bytes: bytes, replacements: Dict[str, bytes]) -> bytes:
     """
@@ -515,57 +503,74 @@ async def upload_document(file: UploadFile = File(...), title: str = Form(defaul
     # **Filename suggestion and renaming logic**
     process_file_name(file, report)
 
-    # -------- Register downloadable file (no base64) --------
-    download_id = uuid.uuid4().hex
-    suggested_file_name = report["suggestedFileName"] or f"{re.sub(r'\.docx$', '', file.filename)}-remediated.docx"
-    out_path = DOWNLOAD_DIR / f"{download_id}.docx"
-    out_path.write_bytes(final_bytes)
-
-    pending[download_id] = {
-        "path": str(out_path),
-        "name": suggested_file_name,  # Use the suggested file name here
-        "expires_at": now_ts() + DOWNLOAD_TTL_SEC,
-    }
-    schedule_cleanup()
-
     return JSONResponse({
         "fileName": file.filename,
         "suggestedFileName": report["suggestedFileName"],
-        "report": report,
-        "downloadId": download_id,
-        "downloadUrl": f"{PUBLIC_BASE_URL}/download/{download_id}",
+        "report": report,    
     })
 
+@app.post("/download-document")
+async def download_document(file: UploadFile = File(...)):
 
-@app.get("/download/{download_id}")
-def download(download_id: str):
-    schedule_cleanup()
-    entry = pending.get(download_id)
-    if not entry:
-        raise HTTPException(404, "Not found or expired")
+    if not file:
+        raise HTTPException(400, "No file uploaded")
+    if not is_docx(file.filename, file.content_type):
+        raise HTTPException(400, detail={
+            "error": "Please upload a .docx file",
+            "details": {"received": {"name": file.filename, "mimetype": file.content_type}},
+        })
 
-    file_path = Path(entry["path"])
-    if not file_path.exists():
-        pending.pop(download_id, None)
-        raise HTTPException(404, "File missing")
+    # Read the file into memory
+    original_bytes = await file.read()
 
-    name = entry["name"]
+    # Phase A: Apply fixes like table header repeat
+    tmp_path = DOWNLOAD_DIR / f"work-{uuid.uuid4().hex}.docx"
+    tmp_path.write_bytes(original_bytes)
+    doc = Document(str(tmp_path))
+    
+    # Apply specific fixes (table headers, etc.)
+    set_table_header_repeat(doc, report={})  # Report not needed, just apply fix
+    doc.save(str(tmp_path))
+    phase_a_bytes = tmp_path.read_bytes()
+    tmp_path.unlink(missing_ok=True)  # Clean up the temp file
 
+    # Phase B: Apply XML replacements
+    replacements: Dict[str, bytes] = {}
+
+    settings_xml = read_xml_part(phase_a_bytes, "word/settings.xml")
+    if settings_xml:
+        new_settings = remove_protection_bytes(settings_xml)
+        if new_settings:
+            replacements["word/settings.xml"] = new_settings
+
+    styles_xml = read_xml_part(phase_a_bytes, "word/styles.xml")
+    if styles_xml:
+        new_styles = set_default_lang_en_us_bytes(styles_xml)
+        if new_styles:
+            replacements["word/styles.xml"] = new_styles
+
+    core_xml = read_xml_part(phase_a_bytes, "docProps/core.xml")
+    if core_xml:
+        new_core = ensure_title_bytes(core_xml)
+        if new_core:
+            replacements["docProps/core.xml"] = new_core
+
+    # Rebuild the file with all fixes
+    final_bytes = write_pkg_xml(phase_a_bytes, replacements)
+
+    # Now, prepare the remediated file for streaming back to the user
+    download_id = uuid.uuid4().hex
+    suggested_file_name = f"{file.filename.rsplit('.', 1)[0]}-remediated.docx"
+    out_path = DOWNLOAD_DIR / f"{download_id}.docx"
+    out_path.write_bytes(final_bytes)
+
+
+    # Return the file as a download
     def iterfile():
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(64 * 1024), b""):
-                yield chunk
-
-    def _cleanup():
-        try:
-            file_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        pending.pop(download_id, None)
+        yield final_bytes  # Stream the remediated file directly
 
     return StreamingResponse(
         iterfile(),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="{Path(name).name}"'},
-        background=BackgroundTask(_cleanup),  # <-- runs after response is sent
-)
+        headers={"Content-Disposition": f'attachment; filename="{suggested_file_name}"'}
+    )
