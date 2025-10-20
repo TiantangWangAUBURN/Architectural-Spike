@@ -1,19 +1,13 @@
 {
-  "version": 2,
-  "builds": [
-    {
-      "src": "server.py",
-      "use": "@vercel/python"
+  "functions": {
+    "docx-converter.js": {
+      "runtime": "@vercel/node@18"
     }
-  ],
+  },
   "routes": [
     {
-      "src": "/download-document",
-      "dest": "/server.py"
-    },
-    {
-      "src": "/upload-document",
-      "dest": "/server.py"
+      "src": "/(.*)",
+      "dest": "/docx-converter.js"
     }
   ]
 }
